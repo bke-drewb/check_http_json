@@ -24,11 +24,10 @@
 require 'rubygems'
 require 'json'
 require 'net/http'
+require 'net/https'
 require 'uri'
 require 'optparse'
 require 'timeout'
-
-
 
 # Herp derp.
 options = {}
@@ -258,6 +257,11 @@ def parse_args(options)
             options[:delimiter] = x
         end
 
+        options[:multiple] = nil
+        opts.on('-m', '--multiple HASH', 'JSON string of multiple elements/values to check. \'{"element1":"value","element2":"value"}\'') do |x|
+          options[:multiple] = x
+        end
+
         options[:warn] = nil
         opts.on('-w', '--warn VALUE', 'Warning threshold (integer).') do |x|
             options[:warn] = x.to_s
@@ -320,24 +324,34 @@ def sanity_check(options)
         error_msg.push('Must specify either target URI or file, but not both.')
     end
 
-    if not (options[:element_string] or options[:element_regex]) then
+    if not (options[:element_string] or options[:element_regex] or options[:multiple]) then
         error_msg.push('Must specify a desired element.')
     end
 
-    if options[:element_string] and options[:element_regex] then
-        error_msg.push('Must specify either an element string OR an element regular expression.')
+    if (options[:element_string] and options[:element_regex]) or 
+      ((options[:element_string] or options[:element_regex]) and options[:multiple]) then
+        error_msg.push('Must specify either an element string OR an element regular expression OR multiple hash option.')
     end
 
     if options[:delimiter].length > 1
         error_msg.push('Delimiter must be a single character.')
     end
 
-    if not ((options[:result_string] or options[:result_regex]) or (options[:warn] and options[:crit]) or (options[:result_string_warn] and options[:result_string_crit])) then
-        error_msg.push('Must specify an expected result OR the warn and crit thresholds.')
+    if not options[:multiple].nil?
+        begin
+          options[:multiple] = JSON.parse(options[:multiple])
+        rescue JSON::ParserError
+          error_msg.push('Multiple must be expressed in json format.')
+        end
     end
 
-    if options[:result_string] and options[:result_regex] then
-        error_msg.push('Must specify either a result string OR result regular expression.')
+    if not ((options[:result_string] or options[:result_regex]) or (options[:warn] and options[:crit]) or (options[:result_string_warn] and options[:result_string_crit]) or options[:multiple]) then
+        error_msg.push('Must specify an expected result OR the warn and crit thresholds OR multiple hash option.')
+    end
+
+    if options[:result_string] and options[:result_regex] or 
+      ((options[:result_string] or options[:result_regex]) and options[:multiple]) then
+        error_msg.push('Must specify either a result string OR result regular expression OR multiple hash option.')
     end
 
     if error_msg.length > 0 then
@@ -352,7 +366,13 @@ def sanity_check(options)
     end
 end
 
-
+def check_string(json_flat, string, perf, verbose)
+    if not json_flat[string] then
+        # Not sure if this should be WARN or CRIT. --phrawzty
+        msg = 'WARN: %s not found in response.' % [string] + perf
+        do_exit(verbose, 1, msg)
+    end
+end
 
 # Run Lola Run.
 
@@ -392,11 +412,7 @@ end
 
 # If the element is a string...
 if options[:element_string] then
-    if not json_flat[options[:element_string]] then
-        # Not sure if this should be WARN or CRIT. --phrawzty
-        msg = 'WARN: %s not found in response.' % [options[:element_string]] + perf
-        do_exit(options[:v], 1, msg)
-    end
+    check_string(json_flat, options[:element_string], perf, options[:v])
     options[:element] = options[:element_string]
 end
 
@@ -415,7 +431,30 @@ if options[:element_regex] then
     end
 end
 
-say(options[:v], 'The value of %s is %s' % [options[:element], json_flat[options[:element]]])
+unless options[:multiple]
+  say(options[:v], 'The value of %s is %s' % [options[:element], json_flat[options[:element]]])
+end
+
+# If we're looking for multiple matches...
+if options[:multiple] then
+    say(options[:v], 'Will match multiple elements')
+    msg = '' 
+    status = 'UNKNOWN'
+    exit_code = 3
+    options[:multiple].each do |element, check|
+        check_string(json_flat, element, perf, options[:v])
+        if json_flat[element].to_s == check.to_s then
+            status = 'OK' unless status =~ /WARN|CRIT/
+            exit_code = 0 unless exit_code =~ /1|2/
+        else
+            status = 'CRIT'
+            exit_code = 2
+        end
+        msg << '%s is %s; ' % [element, json_flat[element].to_s]
+    end
+    msg << perf
+    do_exit(options[:v], exit_code, '%s: %s' % [status, msg])
+end
 
 # If we're looking for a string...
 if options[:result_string] then

@@ -1,3 +1,8 @@
+1.2.x / TBD
+==================
+
+ * Added basic support for checking multiple element/value pairs
+
 1.2.1 / 2013-07-26
 ==================
 
